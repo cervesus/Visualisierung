@@ -1,0 +1,332 @@
+
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Quantization Dashboard Pro</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #0f172a; color: #f8fafc; font-family: 'Inter', sans-serif; }
+        .card { background-color: #1e293b; border-radius: 12px; padding: 20px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3); }
+        canvas { background-color: #020617; border-radius: 8px; width: 100% !important; height: 100% !important; }
+        input[type=range] { width: 100%; accent-color: #3b82f6; cursor: pointer; }
+        .mode-btn { transition: all 0.2s; border: 1px solid #334155; }
+        .mode-btn.active { background-color: #3b82f6; border-color: #60a5fa; color: white; }
+        .stat-val { font-family: monospace; }
+        table { width: 100%; text-align: left; border-collapse: collapse; }
+        th, td { padding: 10px 8px; border-bottom: 1px solid #334155; }
+        th { color: #94a3b8; font-size: 0.75rem; text-transform: uppercase; }
+        td { font-family: monospace; font-size: 0.875rem; }
+        
+        /* Fix for the network canvas filling the space */
+        .canvas-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            min-height: 350px; /* Fixed minimum height to prevent collapse */
+            flex-grow: 1;
+        }
+    </style>
+</head>
+<body class="p-4">
+
+    <div class="max-w-[1800px] mx-auto">
+        <header class="mb-6 text-center">
+            <h1 class="text-4xl font-bold text-blue-400">LLM Quantization Dashboard</h1>
+            <p class="text-slate-400">Visualisierung des Informationsverlusts durch Bit-Reduktion</p>
+        </header>
+
+        <!-- ROW 1: Sidebar | Table | Network -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 mb-6">
+            
+            <!-- Sidebar: Controls & Metrics -->
+            <div class="lg:col-span-2 space-y-4">
+                <div class="card">
+                    <h2 class="text-lg font-semibold mb-4 border-b border-slate-700 pb-2">Steuerung</h2>
+                    <div class="mb-6">
+                        <label class="block text-sm font-medium mb-2">
+                            Bit-Tiefe: <span id="bitValue" class="text-blue-400 font-bold text-lg">16</span>-bit
+                        </label>
+                        <input type="range" id="bitSlider" min="2" max="16" step="1" value="16">
+                        <div class="flex justify-between text-[10px] text-slate-500 mt-1 uppercase">
+                            <span>2-bit</span>
+                            <span>16-bit (FP16)</span>
+                        </div>
+                    </div>
+
+                    <div class="space-y-2">
+                        <label class="block text-sm font-medium mb-2">Ansichtsmodus (Netzwerk):</label>
+                        <button onclick="setMode('quant')" id="btn-quant" class="mode-btn active w-full py-2 rounded text-sm">Quantisiert</button>
+                        <button onclick="setMode('error')" id="btn-error" class="mode-btn w-full py-2 rounded text-sm">Fehler-Analyse (Error)</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3 class="font-semibold mb-2 text-blue-300">Metriken</h3>
+                    <div class="space-y-3 text-sm">
+                        <div class="flex justify-between"><span class="text-slate-400">Speicherersparnis:</span><span id="savingsVal" class="text-green-400 stat-val">0%</span></div>
+                        <div class="flex justify-between"><span class="text-slate-400">Präzision:</span><span id="precisionVal" class="text-blue-400 stat-val">100%</span></div>
+                        <div class="flex justify-between"><span class="text-slate-400">MSE Fehler:</span><span id="errorVal" class="text-red-400 stat-val">0.000</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Table: Example Values -->
+            <div class="lg:col-span-3 card">
+                <h3 class="text-lg font-medium mb-4 text-slate-300">Beispiel-Werte (Gewichte)</h3>
+                <table id="weightTable">
+                    <thead>
+                        <tr>
+                            <th>FP16</th>
+                            <th>Quantisiert</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tableBody">
+                        <!-- Dynamisch gefüllt -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Network: Visual Graph -->
+            <div class="lg:col-span-7 card flex flex-col">
+                <div class="flex justify-between items-center mb-2">
+                    <h3 id="viewTitle" class="text-xl font-medium text-slate-300">Quantisierte Gewichte</h3>
+                </div>
+                <div class="canvas-container">
+                    <canvas id="networkCanvas"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- ROW 2: Line Chart | Histogram -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div class="card">
+                <h3 class="text-lg font-medium mb-4 text-slate-300">Gewichtsverlauf (Original vs. Quantisiert)</h3>
+                <div class="h-[250px]">
+                    <canvas id="lineChart"></canvas>
+                </div>
+            </div>
+            <div class="card">
+                <h3 class="text-lg font-medium mb-4 text-slate-300">Gewichtsverteilung (Histogramm)</h3>
+                <div class="h-[250px]">
+                    <canvas id="distChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('networkCanvas');
+        const ctx = canvas.getContext('2d');
+        const bitSlider = document.getElementById('bitSlider');
+        const bitValueDisplay = document.getElementById('bitValue');
+        const viewTitle = document.getElementById('viewTitle');
+        const savingsVal = document.getElementById('savingsVal');
+        const precisionVal = document.getElementById('precisionVal');
+        const errorVal = document.getElementById('errorVal');
+        const tableBody = document.getElementById('tableBody');
+
+        let currentMode = 'quant'; 
+        let network = { layers: [], edges: [] };
+        let distChart, lineChart;
+
+        function initNetwork() {
+            const layerSizes = [4, 4]; 
+            network.layers = [];
+            for (let i = 0; i < layerSizes.length; i++) {
+                const layer = [];
+                for (let j = 0; j < layerSizes[i]; j++) {
+                    layer.push({ id: i + '-' + j });
+                }
+                network.layers.push(layer);
+            }
+
+            network.edges = [];
+            for (let c = 0; c < network.layers[0].length; c++) {
+                for (let n = 0; n < network.layers[1].length; n++) {
+                    network.edges.push({
+                        from: network.layers[0][c],
+                        to: network.layers[1][n],
+                        fp16: parseFloat(((Math.random() * 2) - 1).toFixed(4)) 
+                    });
+                }
+            }
+        }
+
+        function calculateLayout() {
+            // Resize canvas to match its container size
+            canvas.width = canvas.clientWidth;
+            canvas.height = canvas.clientHeight;
+
+            network.layers.forEach((layer, lIdx) => {
+                const x = (canvas.width / (network.layers.length + 1)) * (lIdx + 1);
+                const verticalSpacing = canvas.height / (layer.length + 1);
+                layer.forEach((node, nIdx) => {
+                    node.x = x;
+                    node.y = verticalSpacing * (nIdx + 1);
+                });
+            });
+        }
+
+        function quantize(val, bits) {
+            if (bits >= 16) return val;
+            const min = -1.5, max = 1.5;
+            const levels = Math.pow(2, bits) - 1;
+            let clamped = Math.max(min, Math.min(max, val));
+            return Math.round(((clamped - min) / (max - min)) * levels) / levels * (max - min) + min;
+        }
+
+        function drawNetwork(bits) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            network.edges.forEach(edge => {
+                const q = quantize(edge.fp16, bits);
+                const diff = Math.abs(edge.fp16 - q);
+                
+                ctx.beginPath();
+                ctx.moveTo(edge.from.x, edge.from.y);
+                ctx.lineTo(edge.to.x, edge.to.y);
+
+                if (currentMode === 'quant') {
+                    ctx.strokeStyle = q > 0 ? '#60a5fa' : '#f87171';
+                    ctx.lineWidth = Math.abs(q) * 6 + 1;
+                    ctx.globalAlpha = 0.6;
+                } else if (currentMode === 'error') {
+                    const visualError = Math.min(diff * 200, 1); 
+                    ctx.strokeStyle = `rgba(250, 204, 21, ${visualError + 0.1})`;
+                    ctx.lineWidth = diff * 30 + 2;
+                    ctx.globalAlpha = 1;
+                }
+                ctx.stroke();
+            });
+
+            network.layers.forEach(layer => {
+                layer.forEach(node => {
+                    ctx.beginPath();
+                    ctx.arc(node.x, node.y, 12, 0, Math.PI * 2);
+                    ctx.fillStyle = '#1e293b';
+                    ctx.fill();
+                    ctx.strokeStyle = '#64748b';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                });
+            });
+            ctx.globalAlpha = 1;
+        }
+
+        function updateTable(bits) {
+            tableBody.innerHTML = '';
+            network.edges.slice(0, 8).forEach(edge => {
+                const q = quantize(edge.fp16, bits);
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td class="text-blue-400">${edge.fp16.toFixed(4)}</td>
+                    <td class="text-red-400">${q.toFixed(4)}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+
+        function updateCharts(bits) {
+            const origs = network.edges.map(e => e.fp16);
+            const quants = network.edges.map(e => quantize(e.fp16, bits));
+            
+            const binCount = 15;
+            const min = -1.5, max = 1.5;
+            const binWidth = (max - min) / binCount;
+            const histOrig = new Array(binCount).fill(0);
+            const histQuant = new Array(binCount).fill(0);
+
+            origs.forEach(v => {
+                let idx = Math.floor((v - min) / binWidth);
+                if (idx >= 0 && idx < binCount) histOrig[idx]++;
+            });
+            quants.forEach(v => {
+                let idx = Math.floor((v - min) / binWidth);
+                if (idx >= 0 && idx < binCount) histQuant[idx]++;
+            });
+
+            distChart.data.datasets[0].data = histOrig;
+            distChart.data.datasets[1].data = histQuant;
+            distChart.update('none');
+
+            lineChart.data.datasets[0].data = origs.map((v, i) => ({x: i, y: v}));
+            lineChart.data.datasets[1].data = quants.map((v, i) => ({x: i, y: v}));
+            lineChart.update('none');
+        }
+
+        function updateAll() {
+            const bits = parseInt(bitSlider.value);
+            bitValueDisplay.innerText = bits;
+
+            let mse = 0;
+            network.edges.forEach(e => {
+                mse += Math.pow(e.fp16 - quantize(e.fp16, bits), 2);
+            });
+            mse = mse / network.edges.length;
+
+            const savings = (1 - (bits / 16)) * 100;
+            const precision = Math.max(0, 100 - (mse * 100));
+
+            savingsVal.innerText = (savings > 0 ? savings.toFixed(0) : 0) + "%";
+            precisionVal.innerText = precision.toFixed(1) + "%";
+            errorVal.innerText = mse.toFixed(5);
+
+            calculateLayout();
+            drawNetwork(bits);
+            updateCharts(bits);
+            updateTable(bits);
+        }
+
+        function setMode(mode) {
+            currentMode = mode;
+            document.querySelectorAll('.mode-btn').forEach(btn => btn.classList.remove('active'));
+            document.getElementById('btn-' + mode).classList.add('active');
+            
+            if(mode === 'quant') viewTitle.innerText = `Quantisierte Gewichte (${bitSlider.value}-bit)`;
+            if(mode === 'error') viewTitle.innerText = "Fehler-Analyse (Error)";
+            updateAll();
+        }
+
+        window.onload = () => {
+            initNetwork();
+            distChart = new Chart(document.getElementById('distChart'), {
+                type: 'bar',
+                data: {
+                    labels: Array.from({length: 15}, (_, i) => i),
+                    datasets: [
+                        { label: 'Original (FP16)', data: [], backgroundColor: '#3b82f6' },
+                        { label: 'Quantisiert', data: [], backgroundColor: '#ef4444' }
+                    ]
+                },
+                options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, grid: { color: '#334155' } }, x: { display: false } }, plugins: { legend: { labels: { color: '#f8fafc' } } } }
+            });
+
+            lineChart = new Chart(document.getElementById('lineChart'), {
+                type: 'line',
+                data: {
+                    datasets: [
+                        { label: 'Original (FP16)', data: [], borderColor: '#3b82f6', borderWidth: 2, pointRadius: 0, fill: false },
+                        { label: 'Quantisiert', data: [], borderColor: '#ef4444', borderWidth: 2, pointRadius: 0, fill: false }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { type: 'linear', title: { display: true, text: 'Gewichts-Index', color: '#94a3b8' }, grid: { color: '#334155' } },
+                        y: { min: -1.5, max: 1.5, grid: { color: '#334155' }, title: { display: true, text: 'Wert', color: '#94a3b8' } }
+                    },
+                    plugins: { legend: { labels: { color: '#f8fafc' } } }
+                }
+            });
+
+            bitSlider.addEventListener('input', updateAll);
+            window.addEventListener('resize', updateAll);
+            updateAll();
+        };
+    </script>
+</body>
+</html>
